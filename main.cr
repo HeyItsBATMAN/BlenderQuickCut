@@ -19,18 +19,18 @@ class Loudness
   @target_offset = "0"
 
   def initialize(@ffmpeg_output : Array(String))
-    @output_i = self.get_param("output_i")
-    @output_tp = self.get_param("output_tp")
-    @output_lra = self.get_param("output_lra")
-    @input_i = self.get_param("input_i")
-    @input_lra = self.get_param("input_lra")
-    @input_tp = self.get_param("input_tp")
-    @input_thresh = self.get_param("input_thresh")
-    @target_offset = self.get_param("target_offset")
+    @output_i = self.get_param("output_i").clamp(-70, -5).to_s
+    @output_tp = self.get_param("output_tp").clamp(-9, 0).to_s
+    @output_lra = self.get_param("output_lra").clamp(1, 20).to_s
+    @input_i = self.get_param("input_i").clamp(-99, 0).to_s
+    @input_lra = self.get_param("input_lra").clamp(0, 99).to_s
+    @input_tp = self.get_param("input_tp").clamp(-99, 99).to_s
+    @input_thresh = self.get_param("input_thresh").clamp(-99, 0).to_s
+    @target_offset = self.get_param("target_offset").clamp(-99, 99).to_s
   end
 
   def get_param(param : String)
-    return @ffmpeg_output.select(&.includes?(param)).first.split(":").last.gsub("\"", "").gsub(",", "").strip
+    return @ffmpeg_output.select(&.includes?(param)).first.split(":").last.gsub("\"", "").gsub(",", "").strip.to_f
   end
 
   def to_s(io)
@@ -57,7 +57,10 @@ def get_video_duration(path : String)
   dirname = Path[path].dirname
   filename = Path[path].basename
   FileUtils.cd(dirname)
+  puts filename
   Process.run("ffprobe", {
+    "-v",
+    "quiet",
     "-hide_banner",
     "-i",
     filename,
@@ -65,6 +68,7 @@ def get_video_duration(path : String)
     "format=duration",
   }, output: stdout, error: stdout)
   output = stdout.to_s
+  puts output
   length = output
     .split("\n")
     .select(&.includes?("duration="))
@@ -121,12 +125,14 @@ ARGV.each do |folder|
     stdout = IO::Memory.new
 
     # Get total length
+    puts "Finding initial video duration..."
     length = get_video_duration(file)
 
     start_time = 0
     end_time = length.round(2)
 
     # Detect silence
+    puts "Detecting silence..."
     Process.run("ffmpeg", {
       "-hide_banner",
       "-i",
@@ -173,6 +179,7 @@ ARGV.each do |folder|
     puts "Start:#{start_time}\tEnd:#{end_time}"
 
     # Loudness first-pass
+    puts "Calculating loudness..."
     Process.run("ffmpeg", {
       "-hide_banner",
       "-i",
@@ -188,6 +195,7 @@ ARGV.each do |folder|
 
     # Loudness prepare second pass
     loudnorm = Loudness.new(output).to_s
+    puts loudnorm
 
     # Encode file with loudnorm filter and new duration
     Process.run("ffmpeg", {
