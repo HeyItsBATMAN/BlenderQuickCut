@@ -8,6 +8,45 @@ class Template
   ECR.def_to_s "template.ecr"
 end
 
+class Loudness
+  @output_i = "0"
+  @output_tp = "0"
+  @output_lra = "0"
+  @input_i = "0"
+  @input_lra = "0"
+  @input_tp = "0"
+  @input_thresh = "0"
+  @target_offset = "0"
+
+  def initialize(@ffmpeg_output : Array(String))
+    @output_i = self.get_param("output_i")
+    @output_tp = self.get_param("output_tp")
+    @output_lra = self.get_param("output_lra")
+    @input_i = self.get_param("input_i")
+    @input_lra = self.get_param("input_lra")
+    @input_tp = self.get_param("input_tp")
+    @input_thresh = self.get_param("input_thresh")
+    @target_offset = self.get_param("target_offset")
+  end
+
+  def get_param(param : String)
+    return @ffmpeg_output.select(&.includes?(param)).first.split(":").last.gsub("\"", "").gsub(",", "").strip
+  end
+
+  def to_s(io)
+    io << "loudnorm=
+    I=#{@output_i}:
+    TP=#{@output_tp}:
+    LRA=#{@output_lra}:
+    measured_I=#{@input_i}:
+    measured_LRA=#{@input_lra}:
+    measured_TP=#{@input_tp}:
+    measured_thresh=#{@input_thresh}:
+    offset=#{@target_offset}:
+    linear=true:print_format=summary".split("\n").map(&.strip).join("")
+  end
+end
+
 VIDEO_EXTS  = ["mp4", "mkv"]
 SUFFIX      = "_loudnorm_nosilence"
 PROCESS_DIR = FileUtils.pwd
@@ -39,19 +78,21 @@ def pad_zero(value : String | Int)
   "00#{value}".split("").last(2).join("")
 end
 
+# Process each folder given as process argument
 ARGV.each do |folder|
   next if !Dir.exists? folder
   next if !File.directory? folder
   puts "Processing #{folder}"
 
+  # Prepare project info
   processed_files = [] of NamedTuple(filename: String, path: String, duration: Float64)
-
   project_name = Path[folder].basename
 
   FileUtils.cd(folder)
   FileUtils.mkdir_p("processed")
   processed_files_folder = Path[folder].join("processed").to_s
 
+  # Process each video file in the folder
   Dir.glob("#{folder}/*.{#{VIDEO_EXTS.join(",")}}") do |file|
     filename = Path[file].basename
     dirname = Path[file].dirname
@@ -61,6 +102,7 @@ ARGV.each do |folder|
 
     puts filename
 
+    # Skip existing
     if filename.includes? SUFFIX
       puts "File already processed. Skipping..."
       next
@@ -75,8 +117,6 @@ ARGV.each do |folder|
       }
       next
     end
-
-    next
 
     stdout = IO::Memory.new
 
@@ -111,6 +151,7 @@ ARGV.each do |folder|
         [st, et].map(&.to_f.round(2))
       } # cleanup time strings
 
+    # Calculate offset start and end positions
     if output.size > 0
       first_silence = output.first
       last_silence = output.last
@@ -146,22 +187,9 @@ ARGV.each do |folder|
     stdout.clear
 
     # Loudness prepare second pass
-    def get_param(param : String)
-      return output.select(&.includes?(param)).first.split(":").last.gsub("\"", "").gsub(",", "").strip
-    end
+    loudnorm = Loudness.new(output).to_s
 
-    loudnorm = "loudnorm=
-    I=#{get_param("output_i")}:
-    TP=#{get_param("output_tp")}:
-    LRA=#{get_param("output_lra")}:
-    measured_I=#{get_param("input_i")}:
-    measured_LRA=#{get_param("input_lra")}:
-    measured_TP=#{get_param("input_tp")}:
-    measured_thresh=#{get_param("input_thresh")}:
-    offset=#{get_param("target_offset")}:
-    linear=true:print_format=summary".split("\n").map(&.strip).join("")
-
-    # Remove silence
+    # Encode file with loudnorm filter and new duration
     Process.run("ffmpeg", {
       "-y",
       "-hide_banner",
@@ -193,17 +221,19 @@ ARGV.each do |folder|
 
   # Sort alphabetically
   processed_files.sort! { |f1, f2| f1[:filename] <=> f2[:filename] }
-
   chapters = [] of NamedTuple(name: String, timestring: String, span: Time::Span)
 
   # Process chapter information
   processed_files.each { |file|
+    # Prepare chapter name (remove extension, suffix and chapter number)
     name = file[:filename]
     namesplit = name.split("-")
     namesplit.shift
     name = namesplit.join("-").strip
     name = Path[name].basename(Path[name].extension)
+    name = name.gsub(SUFFIX, "")
 
+    # Calculate offset from previous chapter
     seconds = file[:duration].floor.to_i
     milliseconds = ((file[:duration] - seconds) * 1000).to_i
     nanoseconds = milliseconds * 1000000
