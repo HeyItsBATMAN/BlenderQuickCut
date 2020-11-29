@@ -234,10 +234,21 @@ ARGV.each do |folder|
     args = ["-y", "-hide_banner", "-v", "quiet", "-stats", "-i", filename,
             "-ss", start_time.to_s, "-to", end_time.to_s, "-af", loudnorm,
             "-crf", "18", outpath]
-    Process.run("ffmpeg", args, output: stdout, error: stdout)
-    output = stdout.to_s
-    stdout.clear
-    debug output
+    Process.run("ffmpeg", args, error: STDOUT) do |process|
+      until process.terminated?
+        line = process.output.gets
+        if line
+          if line.includes? "frame="
+            line = "#{line.strip}\r"
+            print line
+          end
+        else
+          puts ""
+          print "\r"
+          break
+        end
+      end
+    end
 
     processed_files << {
       filename: Path[outpath].basename,
