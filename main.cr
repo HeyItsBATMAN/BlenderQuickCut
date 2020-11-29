@@ -1,5 +1,6 @@
 require "file_utils"
 require "ecr"
+require "json"
 
 # Globals
 VIDEO_EXTS  = ["mp4", "mkv"]
@@ -23,6 +24,10 @@ def error(value : String)
   puts "\u001b[31m#{value}\u001b[0m"
 end
 
+# Types
+alias ChapterInfo = NamedTuple(name: String, timestring: String, span: Time::Span)
+alias ChapterFile = NamedTuple(filename: String, path: String, duration: Float64)
+
 # Classes
 class Template
   def initialize(@title : String, @chapters : Array(String))
@@ -31,41 +36,30 @@ class Template
   ECR.def_to_s "template.ecr"
 end
 
-class Loudness
-  @output_i = "0"
-  @output_tp = "0"
-  @output_lra = "0"
-  @input_i = "0"
-  @input_lra = "0"
-  @input_tp = "0"
-  @input_thresh = "0"
-  @target_offset = "0"
+class LoudnormOutput
+  include JSON::Serializable
 
-  def initialize(@ffmpeg_output : Array(String))
-    @output_i = self.get_param("output_i").clamp(-70, -5).to_s
-    @output_tp = self.get_param("output_tp").clamp(-9, 0).to_s
-    @output_lra = self.get_param("output_lra").clamp(1, 20).to_s
-    @input_i = self.get_param("input_i").clamp(-99, 0).to_s
-    @input_lra = self.get_param("input_lra").clamp(0, 99).to_s
-    @input_tp = self.get_param("input_tp").clamp(-99, 99).to_s
-    @input_thresh = self.get_param("input_thresh").clamp(-99, 0).to_s
-    @target_offset = self.get_param("target_offset").clamp(-99, 99).to_s
-  end
-
-  def get_param(param : String)
-    return @ffmpeg_output.select(&.includes?(param)).first.split(":").last.gsub("\"", "").gsub(",", "").strip.to_f
-  end
+  property input_i : String
+  property input_tp : String
+  property input_lra : String
+  property input_thresh : String
+  property output_i : String
+  property output_tp : String
+  property output_lra : String
+  property output_thresh : String
+  property normalization_type : String
+  property target_offset : String
 
   def to_s(io)
     io << "loudnorm=
-    I=#{@output_i}:
-    TP=#{@output_tp}:
-    LRA=#{@output_lra}:
-    measured_I=#{@input_i}:
-    measured_LRA=#{@input_lra}:
-    measured_TP=#{@input_tp}:
-    measured_thresh=#{@input_thresh}:
-    offset=#{@target_offset}:
+    I=#{@output_i.to_f.clamp(-70, -5)}:
+    TP=#{@output_tp.to_f.clamp(-9, 0)}:
+    LRA=#{@output_lra.to_f.clamp(1, 20)}:
+    measured_I=#{@input_i.to_f.clamp(-99, 0)}:
+    measured_LRA=#{@input_lra.to_f.clamp(0, 99)}:
+    measured_TP=#{@input_tp.to_f.clamp(-99, 99)}:
+    measured_thresh=#{@input_thresh.to_f.clamp(-99, 0)}:
+    offset=#{@target_offset.to_f.clamp(-99, 99)}:
     linear=true:print_format=summary".split("\n").map(&.strip).join("")
   end
 end
@@ -77,24 +71,66 @@ def get_video_duration(path : String)
   dirname = Path[path].dirname
   filename = Path[path].basename
   FileUtils.cd(dirname)
-  Process.run("ffprobe", {
-    "-v",
-    "quiet",
-    "-hide_banner",
-    "-i",
-    filename,
-    "-show_entries",
-    "format=duration",
-  }, output: stdout, error: stdout)
-  output = stdout.to_s
-  length = output
-    .split("\n")
-    .select(&.includes?("duration="))
-    .first.split("=")
-    .last.to_f.round(2)
+  args = ["-v", "quiet", "-hide_banner", "-i", filename,
+          "-show_entries", "format=duration"]
+  Process.run("ffprobe", args, output: stdout, error: stdout)
+  output = stdout.to_s.split("\n")
+  index = output.index { |line| line.includes?("[FORMAT]") }
+  if !index
+    raise "Failed to find duration index"
+  end
+  output = output.skip(index).select(&.includes?("duration=")).first
+  length = output.split("=").last.to_f.round(2)
   debug output
   FileUtils.cd(pwd)
   return length
+end
+
+def get_loudness_params(path : String)
+  stdout = IO::Memory.new
+  pwd = FileUtils.pwd
+  dirname = Path[path].dirname
+  filename = Path[path].basename
+  FileUtils.cd(dirname)
+  args = ["-hide_banner", "-i", filename, "-af",
+          "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json", "-f", "null", "-"]
+  Process.run("ffmpeg", args, output: stdout, error: stdout)
+  output = stdout.to_s.split("\n")
+  stdout.clear
+  index = output.index { |line| line.includes?("Parsed_loudnorm") }
+  if !index
+    raise "Failed to find loudnorm index"
+  end
+  FileUtils.cd(pwd)
+  return output.skip(index + 1).join("\n")
+end
+
+def get_chapter_details(chapter : ChapterFile, last_chapter : ChapterInfo | Nil)
+  # Prepare chapter name (remove extension, suffix and chapter number)
+  name = chapter[:filename]
+  namesplit = name.split("-")
+  namesplit.shift
+  name = namesplit.join("-").strip
+  name = Path[name].basename(Path[name].extension)
+
+  # Calculate offset from previous chapter
+  seconds = chapter[:duration].floor.to_i
+  milliseconds = ((chapter[:duration] - seconds) * 1000).to_i
+  nanoseconds = milliseconds * 1000000
+  span = Time::Span.new(seconds: seconds, nanoseconds: nanoseconds)
+
+  offset = Time::Span.new(seconds: 0)
+  offset = last_chapter[:span] if last_chapter
+
+  span += offset
+
+  timestring = "#{pad_zero(offset.minutes)}:#{pad_zero(offset.seconds)}"
+
+  return {
+    name:       name,
+    timestring: timestring,
+    span:       span,
+  }
 end
 
 def pad_zero(value : String | Int)
@@ -148,16 +184,9 @@ ARGV.each do |folder|
 
     # Detect silence
     info "Detecting silence..."
-    Process.run("ffmpeg", {
-      "-hide_banner",
-      "-i",
-      filename,
-      "-af",
-      "silencedetect=n=-50dB:d=2",
-      "-f",
-      "null",
-      "2>&1",
-    }, output: stdout, error: stdout)
+    args = ["-hide_banner", "-i", filename, "-af",
+            "silencedetect=n=-50dB:d=2", "-f", "null", "2>&1"]
+    Process.run("ffmpeg", args, output: stdout, error: stdout)
     output = stdout.to_s
     output = output
       .split("\n")                          # split lines
@@ -195,42 +224,17 @@ ARGV.each do |folder|
 
     # Loudness first-pass
     info "Calculating loudness..."
-    Process.run("ffmpeg", {
-      "-hide_banner",
-      "-i",
-      filename,
-      "-af",
-      "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json",
-      "-f",
-      "null",
-      "-",
-    }, output: stdout, error: stdout)
-    output = stdout.to_s.split("\n")
-    stdout.clear
-
+    output = get_loudness_params(file)
     # Loudness prepare second pass
-    loudnorm = Loudness.new(output).to_s
+    loudnorm = LoudnormOutput.from_json(%(#{output})).to_s
     debug loudnorm
 
     # Encode file with loudnorm filter and new duration
-    Process.run("ffmpeg", {
-      "-y",
-      "-hide_banner",
-      "-v",
-      "quiet",
-      "-stats",
-      "-i",
-      filename,
-      "-ss",
-      start_time.to_s,
-      "-to",
-      end_time.to_s,
-      "-af",
-      loudnorm,
-      "-crf",
-      "18",
-      outpath,
-    }, output: stdout, error: stdout)
+    info "Encoding file #{filename}"
+    args = ["-y", "-hide_banner", "-v", "quiet", "-stats", "-i", filename,
+            "-ss", start_time.to_s, "-to", end_time.to_s, "-af", loudnorm,
+            "-crf", "18", outpath]
+    Process.run("ffmpeg", args, output: stdout, error: stdout)
     output = stdout.to_s
     stdout.clear
     debug output
@@ -244,35 +248,11 @@ ARGV.each do |folder|
 
   # Sort alphabetically
   processed_files.sort! { |f1, f2| f1[:filename] <=> f2[:filename] }
-  chapters = [] of NamedTuple(name: String, timestring: String, span: Time::Span)
 
   # Process chapter information
+  chapters = [] of ChapterInfo
   processed_files.each { |file|
-    # Prepare chapter name (remove extension, suffix and chapter number)
-    name = file[:filename]
-    namesplit = name.split("-")
-    namesplit.shift
-    name = namesplit.join("-").strip
-    name = Path[name].basename(Path[name].extension)
-
-    # Calculate offset from previous chapter
-    seconds = file[:duration].floor.to_i
-    milliseconds = ((file[:duration] - seconds) * 1000).to_i
-    nanoseconds = milliseconds * 1000000
-    span = Time::Span.new(seconds: seconds, nanoseconds: nanoseconds)
-
-    offset = Time::Span.new(seconds: 0)
-    offset = chapters.last[:span] if chapters.size > 0
-
-    span += offset
-
-    timestring = "#{pad_zero(offset.minutes)}:#{pad_zero(offset.seconds)}"
-
-    chapters << {
-      name:       name,
-      timestring: timestring,
-      span:       span,
-    }
+    chapters << get_chapter_details(file, chapters.last?)
   }
 
   # Write chapter file
@@ -298,15 +278,10 @@ ARGV.each do |folder|
 
   # Setup .blend file
   info "Setting up .blend file..."
-  Process.run("blender", {
-    "base.blend",
-    "--background",
-    "--python",
-    "setup_blend.py",
-    "--",
-    "input_path=#{processed_files_folder}",
-    "output_file=#{project_name}",
-  }, error: STDOUT) do |process|
+  args = ["base.blend", "--background", "--python",
+          "setup_blend.py", "--", "input_path=#{processed_files_folder}",
+          "output_file=#{project_name}"]
+  Process.run("blender", args, error: STDOUT) do |process|
     until process.terminated?
       line = process.output.gets
       if line
@@ -324,13 +299,8 @@ ARGV.each do |folder|
   blend_file_path = Path[processed_files_folder].join("#{project_name}.blend")
   video_file_path = Path[processed_files_folder].join("#{project_name}.mp4")
   info "Rendering final file..."
-  Process.run("blender", {
-    "--background",
-    "#{blend_file_path}",
-    "-x",
-    "1",
-    "-a",
-  }, error: STDOUT) do |process|
+  args = ["--background", "#{blend_file_path}", "-x", "1", "-a"]
+  Process.run("blender", args, error: STDOUT) do |process|
     until process.terminated?
       line = process.output.gets
       if line
