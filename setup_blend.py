@@ -1,9 +1,10 @@
 # Author: Kai Niebes <kai.niebes@outlook.com>
 # Description:
 # Import video files to the blender sequence editor from a folder,
-# line them all up, add fade-in-out and render the sequence
+# line them all up and add fade-in-out.
+# Check the final .blend to see if everything worked
 # Usage:
-# blender --background --python quickcut.py -- input_path="/path/to/folder" output_file="example.mp4"
+# blender --background --python setup_blend.py -- input_path="/path/to/folder" output_file="example"
 
 import bpy
 import sys
@@ -73,17 +74,16 @@ for filepath in input_files:
 final_frame = max(seq.frame_final_end for seq in bpy.context.sequences)
 bpy.context.scene.frame_current = final_frame
 bpy.ops.anim.end_frame_set()
+print("Total frames: {}".format(final_frame))
 
 # Render file
 output_directory = input_path
 output_filename = opts.get("output_file")
-output_path = os.path.join(output_directory, output_filename)
-blend_output_path = output_path + ".blend"
-bpy.context.scene.render.filepath = output_path
+mp4 = output_filename + ".mp4"
+blend = output_filename + ".blend"
+blend_output_path = os.path.join(output_directory, blend)
+bpy.context.scene.render.filepath = os.path.join(output_directory, mp4)
 
 if os.path.exists(blend_output_path):
   os.remove(blend_output_path)
 bpy.ops.wm.save_as_mainfile(filepath=blend_output_path)
-
-if not os.path.exists(output_path):
-  bpy.ops.render.render(animation=True, use_viewport=True)

@@ -1,6 +1,29 @@
 require "file_utils"
 require "ecr"
 
+# Globals
+VIDEO_EXTS  = ["mp4", "mkv"]
+PROCESS_DIR = FileUtils.pwd
+DEBUG       = true
+
+# Color Terminal
+def info(value : String)
+  puts "\u001b[35m#{value}\u001b[0m"
+end
+
+def debug(value : String)
+  puts "\u001b[33m#{value}\u001b[0m" if DEBUG
+end
+
+def success(value : String)
+  puts "\u001b[32m#{value}\u001b[0m"
+end
+
+def error(value : String)
+  puts "\u001b[31m#{value}\u001b[0m"
+end
+
+# Classes
 class Template
   def initialize(@title : String, @chapters : Array(String))
   end
@@ -47,17 +70,13 @@ class Loudness
   end
 end
 
-VIDEO_EXTS  = ["mp4", "mkv"]
-SUFFIX      = "_loudnorm_nosilence"
-PROCESS_DIR = FileUtils.pwd
-
+# Helper functions
 def get_video_duration(path : String)
   stdout = IO::Memory.new
   pwd = FileUtils.pwd
   dirname = Path[path].dirname
   filename = Path[path].basename
   FileUtils.cd(dirname)
-  puts filename
   Process.run("ffprobe", {
     "-v",
     "quiet",
@@ -68,12 +87,12 @@ def get_video_duration(path : String)
     "format=duration",
   }, output: stdout, error: stdout)
   output = stdout.to_s
-  puts output
   length = output
     .split("\n")
     .select(&.includes?("duration="))
     .first.split("=")
     .last.to_f.round(2)
+  debug output
   FileUtils.cd(pwd)
   return length
 end
@@ -82,11 +101,12 @@ def pad_zero(value : String | Int)
   "00#{value}".split("").last(2).join("")
 end
 
+# Main program
 # Process each folder given as process argument
 ARGV.each do |folder|
   next if !Dir.exists? folder
   next if !File.directory? folder
-  puts "Processing #{folder}"
+  info "Processing #{folder}"
 
   # Prepare project info
   processed_files = [] of NamedTuple(filename: String, path: String, duration: Float64)
@@ -101,38 +121,33 @@ ARGV.each do |folder|
     filename = Path[file].basename
     dirname = Path[file].dirname
     extension = Path[file].extension
-    outfilename = filename.gsub(extension, "#{SUFFIX}#{extension}")
-    outpath = Path["processed"].join(outfilename).to_s
-
-    puts filename
+    outpath = Path["processed"].join(filename).to_s
 
     # Skip existing
-    if filename.includes? SUFFIX
-      puts "File already processed. Skipping..."
-      next
-    end
-
     if File.exists?(outpath)
-      puts "Output already exists"
+      filename = Path[outpath].basename
+      info "Output already exists... #{filename}"
       processed_files << {
-        filename: Path[outpath].basename,
+        filename: filename,
         path:     Path[folder].join(outpath).to_s,
         duration: get_video_duration(outpath),
       }
       next
     end
 
+    info "Processing #{filename}"
+
     stdout = IO::Memory.new
 
     # Get total length
-    puts "Finding initial video duration..."
+    info "Finding initial video duration..."
     length = get_video_duration(file)
 
     start_time = 0
     end_time = length.round(2)
 
     # Detect silence
-    puts "Detecting silence..."
+    info "Detecting silence..."
     Process.run("ffmpeg", {
       "-hide_banner",
       "-i",
@@ -164,10 +179,10 @@ ARGV.each do |folder|
       stdout.clear
 
       # Get silent parts and configure time
-      puts "First:#{first_silence}\tLast:#{last_silence}\tDuration:#{length}"
+      debug "First:#{first_silence}\tLast:#{last_silence}\tDuration:#{length}"
       has_intro_silence = first_silence.first < 0.5
       has_outro_silence = (last_silence.last - length).abs < 0.5
-      puts "Intro:#{has_intro_silence}\tOutro:#{has_outro_silence}"
+      debug "Intro:#{has_intro_silence}\tOutro:#{has_outro_silence}"
 
       if has_intro_silence
         start_time = (first_silence.last - 1).round(2)
@@ -176,10 +191,10 @@ ARGV.each do |folder|
         end_time = (last_silence.first + 1).round(2)
       end
     end
-    puts "Start:#{start_time}\tEnd:#{end_time}"
+    debug "Start:#{start_time}\tEnd:#{end_time}"
 
     # Loudness first-pass
-    puts "Calculating loudness..."
+    info "Calculating loudness..."
     Process.run("ffmpeg", {
       "-hide_banner",
       "-i",
@@ -195,7 +210,7 @@ ARGV.each do |folder|
 
     # Loudness prepare second pass
     loudnorm = Loudness.new(output).to_s
-    puts loudnorm
+    debug loudnorm
 
     # Encode file with loudnorm filter and new duration
     Process.run("ffmpeg", {
@@ -218,7 +233,7 @@ ARGV.each do |folder|
     }, output: stdout, error: stdout)
     output = stdout.to_s
     stdout.clear
-    puts output
+    debug output
 
     processed_files << {
       filename: Path[outpath].basename,
@@ -239,7 +254,6 @@ ARGV.each do |folder|
     namesplit.shift
     name = namesplit.join("-").strip
     name = Path[name].basename(Path[name].extension)
-    name = name.gsub(SUFFIX, "")
 
     # Calculate offset from previous chapter
     seconds = file[:duration].floor.to_i
@@ -275,17 +289,66 @@ ARGV.each do |folder|
 
   render_output = Path[processed_files_folder].join("#{project_name}.mp4")
   if File.exists?(render_output)
-    puts "Project #{project_name} already rendered. Skipping..."
+    info "Project #{project_name} already rendered. Skipping..."
     next
   end
 
+  current_frame = 0
+  total_frames = 0
+
+  # Setup .blend file
+  info "Setting up .blend file..."
   Process.run("blender", {
     "base.blend",
     "--background",
     "--python",
-    "quickcut.py",
+    "setup_blend.py",
     "--",
     "input_path=#{processed_files_folder}",
-    "output_file=#{project_name}.mp4",
-  }, output: STDOUT, error: STDOUT)
+    "output_file=#{project_name}",
+  }, error: STDOUT) do |process|
+    until process.terminated?
+      line = process.output.gets
+      if line
+        if line.includes? "Total frames:"
+          total_frames = line.split(":").last.strip.to_i
+        end
+        if line.includes? "Blender quit"
+          break
+        end
+      end
+    end
+  end
+
+  # Render .blend file
+  blend_file_path = Path[processed_files_folder].join("#{project_name}.blend")
+  video_file_path = Path[processed_files_folder].join("#{project_name}.mp4")
+  info "Rendering final file..."
+  Process.run("blender", {
+    "--background",
+    "#{blend_file_path}",
+    "-x",
+    "1",
+    "-a",
+  }, error: STDOUT) do |process|
+    until process.terminated?
+      line = process.output.gets
+      if line
+        if line.includes? "Append frame"
+          frame_no = line.split("frame").last.strip.to_i
+          current_frame = frame_no
+        end
+        if line.includes? "Blender quit"
+          break
+        end
+        print "#{current_frame}/#{total_frames}\r"
+      end
+    end
+  end
+
+  if File.exists? video_file_path
+    success "Rendered file: #{video_file_path}"
+  else
+    error "Failed rendering file: #{video_file_path}"
+  end
 end
