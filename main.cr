@@ -6,6 +6,7 @@ require "json"
 VIDEO_EXTS  = ["mp4", "mkv"]
 PROCESS_DIR = FileUtils.pwd
 DEBUG       = true
+CPU_COUNT   = (System.cpu_count / 2).to_i
 
 # Color Terminal
 def info(value : String)
@@ -306,30 +307,46 @@ ARGV.each do |folder|
     end
   end
 
-  # Render .blend file
+  # Multithreaded rendering of the .blend
   blend_file_path = Path[processed_files_folder].join("#{project_name}.blend")
-  video_file_path = Path[processed_files_folder].join("#{project_name}.mp4")
-  info "Rendering final file..."
-  args = ["--background", "#{blend_file_path}", "-x", "1", "-a"]
-  Process.run("blender", args, error: STDOUT) do |process|
-    until process.terminated?
-      line = process.output.gets
-      if line
-        if line.includes? "Append frame"
-          frame_no = line.split("frame").last.strip.to_i
-          current_frame = frame_no
-        end
-        if line.includes? "Blender quit"
-          break
-        end
-        print "#{current_frame}/#{total_frames}\r"
-      end
+  FileUtils.cd(processed_files_folder)
+  chunk_size = total_frames.tdiv(CPU_COUNT)
+  info "Rendering chunks..."
+  channel_chunks = Channel(String).new
+  chunks = Array(String).new(CPU_COUNT) { |i| "#{project_name}_chunk#{i}.mp4" }
+  File.write("list.txt", chunks.map { |chunk| "file ./#{chunk}" }.join("\n"))
+  CPU_COUNT.times do |i|
+    start, stop = i * chunk_size, (i + 1) * chunk_size
+    spawn do
+      chunk_path = chunks.shift
+      args = ["--background", "#{blend_file_path}",
+              "-o", "//#{chunk_path}",
+              "-s", "#{start}",
+              "-e", "#{stop}",
+              "-x", "1", "-a"]
+      Process.run("blender", args, error: STDOUT)
+      channel_chunks.send(chunk_path)
     end
   end
 
-  if File.exists? video_file_path
-    success "Rendered file: #{video_file_path}"
+  CPU_COUNT.times do
+    chunk = channel_chunks.receive
+    debug "Chunk finished: #{chunk}"
+  end
+
+  # Merge chunks
+  info "Merging final chunks..."
+  args = ["-hide_banner", "-v", "quiet", "-stats",
+          "-f", "concat", "-safe", "0", "-i", "list.txt",
+          "-crf", "20", "#{project_name}.mp4"]
+  Process.run("ffmpeg", args, output: STDOUT, error: STDOUT)
+
+  if File.exists? render_output
+    success "Rendered file: #{render_output}"
+    chunks.each do |chunk|
+      File.delete chunk
+    end
   else
-    error "Failed rendering file: #{video_file_path}"
+    error "Failed rendering file: #{render_output}"
   end
 end
