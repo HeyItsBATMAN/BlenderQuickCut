@@ -314,7 +314,10 @@ ARGV.each do |folder|
   info "Rendering chunks..."
   channel_chunks = Channel(String).new
   chunks = Array(String).new(CPU_COUNT) { |i| "#{project_name}_chunk#{i}.mp4" }
-  File.write("list.txt", chunks.map { |chunk| "file ./#{chunk}" }.join("\n"))
+  File.write("list.txt", chunks.map { |chunk|
+    cleaned_name = chunk.gsub(" ", "\\ ")
+    "file ./#{cleaned_name}"
+  }.join("\n"))
   CPU_COUNT.times do |i|
     start, stop = i * chunk_size, (i + 1) * chunk_size
     spawn do
