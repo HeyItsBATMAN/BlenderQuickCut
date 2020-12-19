@@ -230,11 +230,17 @@ ARGV.each do |folder|
     loudnorm = LoudnormOutput.from_json(%(#{output})).to_s
     debug loudnorm
 
-    # Encode file with loudnorm filter and new duration
+    audio_filters = [loudnorm]
+    # Noise reduction
+    audio_filters << "afftdn"
+
+    debug audio_filters.join(",")
+
+    # Encode file with audio filters and new duration
     info "Encoding file #{filename}"
     args = ["-y", "-hide_banner", "-v", "quiet", "-stats", "-i", filename,
-            "-ss", start_time.to_s, "-to", end_time.to_s, "-af", loudnorm,
-            "-crf", "18", outpath]
+            "-ss", start_time.to_s, "-to", end_time.to_s, "-af",
+            audio_filters.join(","), "-crf", "18", outpath]
     Process.run("ffmpeg", args, error: STDOUT) do |process|
       until process.terminated?
         line = process.output.gets
