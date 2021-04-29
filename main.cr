@@ -3,10 +3,13 @@ require "ecr"
 require "json"
 
 # Globals
-VIDEO_EXTS  = ["mp4", "mkv"]
-PROCESS_DIR = FileUtils.pwd
-DEBUG       = true
-CPU_COUNT   = (System.cpu_count / 2).to_i
+VIDEO_EXTS    = ["mp4", "mkv"]
+PROCESS_DIR   = FileUtils.pwd
+DEBUG         = true
+CPU_COUNT     = [1, ((System.cpu_count - 2) / 2).to_i].max
+FADE_DURATION = 0.75
+
+info "Using #{CPU_COUNT} workers"
 
 # Color Terminal
 def info(value : String)
@@ -234,13 +237,27 @@ ARGV.each do |folder|
     # Noise reduction
     audio_filters << "afftdn"
 
+    # Fade in and out of video
+    video_filters = [
+      "fade=t=in:st=#{start_time}:d=#{FADE_DURATION}",
+      "fade=t=out:st=#{end_time - FADE_DURATION}:d=#{FADE_DURATION}",
+    ]
+    audio_filters << "afade=t=in:st=#{start_time}:d=#{FADE_DURATION}"
+    audio_filters << "afade=t=out:st=#{end_time - FADE_DURATION}:d=#{FADE_DURATION}"
+
     debug audio_filters.join(",")
+    debug video_filters.join(",")
 
     # Encode file with audio filters and new duration
     info "Encoding file #{filename}"
-    args = ["-y", "-hide_banner", "-v", "quiet", "-stats", "-i", filename,
-            "-ss", start_time.to_s, "-to", end_time.to_s, "-af",
-            audio_filters.join(","), "-crf", "18", outpath]
+    args = ["-y", "-hide_banner", "-v", "quiet", "-stats",
+            "-i", filename,
+            "-ss", start_time.to_s,
+            "-to", end_time.to_s,
+            "-af", audio_filters.join(","),
+            "-vf", video_filters.join(","),
+            "-crf", "18",
+            outpath]
     Process.run("ffmpeg", args, error: STDOUT) do |process|
       until process.terminated?
         line = process.output.gets
@@ -282,69 +299,19 @@ ARGV.each do |folder|
   html = Template.new(project_name, chapter_content.split("\n")).to_s
   File.write("markup.html", html)
 
-  # Render project in blender
-  FileUtils.cd(PROCESS_DIR)
-
+  # Merge video files
   render_output = Path[processed_files_folder].join("#{project_name}.mp4")
   if File.exists?(render_output)
     info "Project #{project_name} already rendered. Skipping..."
     next
   end
 
-  current_frame = 0
-  total_frames = 0
-
-  # Setup .blend file
-  info "Setting up .blend file..."
-  args = ["base.blend", "--background", "--python",
-          "setup_blend.py", "--", "input_path=#{processed_files_folder}",
-          "output_file=#{project_name}"]
-  Process.run("blender", args, error: STDOUT) do |process|
-    until process.terminated?
-      line = process.output.gets
-      if line
-        if line.includes? "Total frames:"
-          total_frames = line.split(":").last.strip.to_i
-        end
-        if line.includes? "Blender quit"
-          break
-        end
-      end
-    end
-  end
-
-  # Multithreaded rendering of the .blend
-  blend_file_path = Path[processed_files_folder].join("#{project_name}.blend")
-  FileUtils.cd(processed_files_folder)
-  chunk_size = total_frames.tdiv(CPU_COUNT)
-  info "Rendering chunks..."
-  channel_chunks = Channel(String).new
-  chunks = Array(String).new(CPU_COUNT) { |i| "#{project_name}_chunk#{i}.mp4" }
-  File.write("list.txt", chunks.map { |chunk|
-    cleaned_name = chunk.gsub(" ", "\\ ")
+  File.write("list.txt", processed_files.map { |file|
+    cleaned_name = file[:filename].gsub(" ", "\\ ")
     "file ./#{cleaned_name}"
   }.join("\n"))
-  CPU_COUNT.times do |i|
-    start, stop = i * chunk_size, (i + 1) * chunk_size
-    spawn do
-      chunk_path = chunks.shift
-      args = ["--background", "#{blend_file_path}",
-              "-o", "//#{chunk_path}",
-              "-s", "#{start}",
-              "-e", "#{stop}",
-              "-x", "1", "-a"]
-      Process.run("blender", args, error: STDOUT)
-      channel_chunks.send(chunk_path)
-    end
-  end
 
-  CPU_COUNT.times do
-    chunk = channel_chunks.receive
-    debug "Chunk finished: #{chunk}"
-  end
-
-  # Merge chunks
-  info "Merging final chunks..."
+  info "Merging video files..."
   args = ["-hide_banner", "-v", "quiet", "-stats",
           "-f", "concat", "-safe", "0", "-i", "list.txt",
           "-crf", "20", "#{project_name}.mp4"]
@@ -352,9 +319,6 @@ ARGV.each do |folder|
 
   if File.exists? render_output
     success "Rendered file: #{render_output}"
-    chunks.each do |chunk|
-      File.delete chunk
-    end
   else
     error "Failed rendering file: #{render_output}"
   end
