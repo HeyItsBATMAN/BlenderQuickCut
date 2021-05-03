@@ -312,9 +312,18 @@ ARGV.each do |folder|
   }.join("\n"))
 
   info "Merging video files..."
-  args = ["-hide_banner", "-v", "quiet", "-stats",
-          "-f", "concat", "-safe", "0", "-i", "list.txt",
-          "-crf", "20", "#{project_name}.mp4"]
+  args = [
+    # Hide unwanted information
+    "-hide_banner", "-v", "quiet", "-stats",
+    # Input file list
+    "-f", "concat", "-safe", "0", "-i", "list.txt",
+    # Set audio sampling rate
+    "-ar", "48000",
+    # Set video quality
+    "-crf", "20",
+    # Output
+    "#{project_name}.mp4",
+  ]
   Process.run("ffmpeg", args, output: STDOUT, error: STDOUT)
 
   if File.exists? render_output
