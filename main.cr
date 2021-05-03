@@ -321,6 +321,8 @@ ARGV.each do |folder|
     "-ar", "48000",
     # Set video quality
     "-crf", "20",
+    # For streaming
+    "-movflags", "faststart",
     # Output
     "#{project_name}.mp4",
   ]
